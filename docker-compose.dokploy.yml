@@ -1,0 +1,162 @@
+# CISO Assistant - Deployment-Variante für die indasys Dokploy-Instanz (SVW-HQ1-DEPLOY01)
+#
+# Unterschiede zur mitgelieferten docker-compose.yml:
+#   - PostgreSQL statt SQLite (kein Bind-Mount-Permission-Krampf, produktionstauglich)
+#   - Kein Caddy: TLS und Routing übernimmt Dokploys Traefik (siehe docs/DEPLOYMENT.md)
+#   - Attachments (Evidence-Uploads) liegen auf einem persistenten Named Volume
+#   - init-attachments fixt die Volume-Ownership auf UID 1001 vor dem Backend-Start
+#   - Secrets/Domain kommen aus Environment Variables (in Dokploy im Tab "Environment" setzen)
+#
+# Alle mit ${...} referenzierten Variablen MÜSSEN in Dokploy gesetzt sein.
+
+services:
+  postgres:
+    container_name: ciso-postgres
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      - POSTGRES_DB=${POSTGRES_NAME}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # Läuft als root, chownt das Attachments-Volume auf UID 1001 und beendet sich.
+  # Ohne diesen Schritt kann das read_only-Backend (User 1001) nicht in das
+  # frisch angelegte Volume schreiben -> Upload-Fehler.
+  init-attachments:
+    container_name: ciso-init-attachments
+    image: busybox:stable
+    user: "0:0"
+    command: sh -c "mkdir -p /code/attachments && chown -R 1001:1001 /code/attachments"
+    volumes:
+      - attachments_data:/code/attachments
+
+  backend:
+    container_name: backend
+    image: ghcr.io/intuitem/ciso-assistant-community/backend:latest
+    pull_policy: always
+    restart: always
+    environment:
+      - ALLOWED_HOSTS=backend,${CISO_HOSTNAME}
+      - CISO_ASSISTANT_URL=https://${CISO_HOSTNAME}
+      - DJANGO_DEBUG=False
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - AUTH_TOKEN_TTL=7200
+      - LOCAL_STORAGE_DIRECTORY=/code/attachments
+      - POSTGRES_NAME=${POSTGRES_NAME}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - HOME=/tmp
+      - XDG_CACHE_HOME=/tmp/.cache
+      - XDG_CONFIG_HOME=/tmp/.config
+      - XDG_DATA_HOME=/tmp/.local/share
+      - QDRANT_URL=http://qdrant:6333
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev
+    volumes:
+      - attachments_data:/code/attachments
+    user: "1001:1001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      init-attachments:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://backend:8000/api/health/ || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 150s
+
+  huey:
+    container_name: huey
+    image: ghcr.io/intuitem/ciso-assistant-community/backend:latest
+    pull_policy: always
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always
+    environment:
+      - ALLOWED_HOSTS=backend,${CISO_HOSTNAME}
+      - CISO_ASSISTANT_URL=https://${CISO_HOSTNAME}
+      - DJANGO_DEBUG=False
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - AUTH_TOKEN_TTL=7200
+      - LOCAL_STORAGE_DIRECTORY=/code/attachments
+      - POSTGRES_NAME=${POSTGRES_NAME}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - HOME=/tmp
+      - XDG_CACHE_HOME=/tmp/.cache
+      - XDG_CONFIG_HOME=/tmp/.config
+      - XDG_DATA_HOME=/tmp/.local/share
+      - QDRANT_URL=http://qdrant:6333
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev
+    volumes:
+      - attachments_data:/code/attachments
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        python manage.py run_huey -w 2 --scheduler-interval 60
+    user: "1001:1001"
+
+  frontend:
+    container_name: frontend
+    image: ghcr.io/intuitem/ciso-assistant-community/frontend:latest
+    pull_policy: always
+    restart: always
+    environment:
+      - PUBLIC_BACKEND_API_URL=http://backend:8000/api
+      - PUBLIC_BACKEND_API_EXPOSED_URL=https://${CISO_HOSTNAME}/api
+      - PROTOCOL_HEADER=x-forwarded-proto
+      - HOST_HEADER=x-forwarded-host
+      - HOME=/tmp
+      - XDG_CACHE_HOME=/tmp/.cache
+      - XDG_CONFIG_HOME=/tmp/.config
+      - XDG_DATA_HOME=/tmp/.local/share
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev
+    depends_on:
+      backend:
+        condition: service_healthy
+    user: "1001:1001"
+
+  qdrant:
+    container_name: qdrant
+    image: qdrant/qdrant:v1.14.0
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+volumes:
+  postgres_data:
+  attachments_data:
+  qdrant_data:
