@@ -1,11 +1,16 @@
 # CISO Assistant - Deployment-Variante für die indasys Dokploy-Instanz (SVW-HQ1-DEPLOY01)
 #
 # Unterschiede zur mitgelieferten docker-compose.yml:
-#   - PostgreSQL statt SQLite (kein Bind-Mount-Permission-Krampf, produktionstauglich)
+#   - PostgreSQL statt SQLite für die Haupt-DB (kein Bind-Mount-Permission-Krampf)
 #   - Kein Caddy: TLS und Routing übernimmt Dokploys Traefik (siehe docs/DEPLOYMENT.md)
-#   - Attachments (Evidence-Uploads) liegen auf einem persistenten Named Volume
-#   - init-attachments fixt die Volume-Ownership auf UID 1001 vor dem Backend-Start
+#   - Ein persistentes Named Volume für /code/db (Attachments + Huey-Queue-SQLite)
+#   - init-data fixt die Volume-Ownership auf UID 1001 vor dem Backend-Start
 #   - Secrets/Domain kommen aus Environment Variables (in Dokploy im Tab "Environment" setzen)
+#
+# Hinweis zu /code/db: Auch mit Postgres schreiben backend und huey noch Dateien in
+# dieses Verzeichnis - vor allem huey.db (die Async-Task-Queue, eigene SQLite) und die
+# hochgeladenen Evidences unter db/attachments. Deshalb braucht es ein gemeinsames,
+# beschreibbares und persistentes Volume, das beide Container teilen.
 #
 # Alle mit ${...} referenzierten Variablen MÜSSEN in Dokploy gesetzt sein.
 
@@ -27,16 +32,16 @@ services:
       retries: 10
       start_period: 30s
 
-  # Läuft als root, chownt das Attachments-Volume auf UID 1001 und beendet sich.
+  # Läuft als root, chownt das db-Volume auf UID 1001 und beendet sich.
   # Ohne diesen Schritt kann das read_only-Backend (User 1001) nicht in das
-  # frisch angelegte Volume schreiben -> Upload-Fehler.
-  init-attachments:
-    container_name: ciso-init-attachments
+  # frisch angelegte Volume schreiben -> huey.db/Attachments-Fehler.
+  init-data:
+    container_name: ciso-init-data
     image: busybox:stable
     user: "0:0"
-    command: sh -c "mkdir -p /code/attachments && chown -R 1001:1001 /code/attachments"
+    command: sh -c "mkdir -p /code/db/attachments && chown -R 1001:1001 /code/db"
     volumes:
-      - attachments_data:/code/attachments
+      - app_data:/code/db
 
   backend:
     container_name: backend
@@ -49,7 +54,6 @@ services:
       - DJANGO_DEBUG=False
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
       - AUTH_TOKEN_TTL=7200
-      - LOCAL_STORAGE_DIRECTORY=/code/attachments
       - POSTGRES_NAME=${POSTGRES_NAME}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
@@ -68,12 +72,12 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev
     volumes:
-      - attachments_data:/code/attachments
+      - app_data:/code/db
     user: "1001:1001"
     depends_on:
       postgres:
         condition: service_healthy
-      init-attachments:
+      init-data:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://backend:8000/api/health/ || exit 1"]
@@ -96,7 +100,6 @@ services:
       - DJANGO_DEBUG=False
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
       - AUTH_TOKEN_TTL=7200
-      - LOCAL_STORAGE_DIRECTORY=/code/attachments
       - POSTGRES_NAME=${POSTGRES_NAME}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
@@ -115,7 +118,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev
     volumes:
-      - attachments_data:/code/attachments
+      - app_data:/code/db
     entrypoint:
       - /bin/sh
       - -c
@@ -158,5 +161,5 @@ services:
 
 volumes:
   postgres_data:
-  attachments_data:
+  app_data:
   qdrant_data:

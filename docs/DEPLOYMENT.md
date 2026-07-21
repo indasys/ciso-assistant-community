@@ -34,10 +34,17 @@ Volume-Ownership fixt.
 | `huey`             | Async Worker (Mail, Background Jobs)   | nein                       |
 | `postgres`         | Datenbank                              | nein                       |
 | `qdrant`           | Vektor-DB für die AI-Features          | nein                       |
-| `init-attachments` | Einmal-Job, chownt das Attachment-Volume | nein (beendet sich)      |
+| `init-data`        | Einmal-Job, chownt das db-Volume       | nein (beendet sich)        |
 
 Persistente Daten liegen auf drei Named Volumes: `postgres_data` (Datenbank),
-`attachments_data` (hochgeladene Evidences) und `qdrant_data` (Vektor-Index).
+`app_data` (hochgeladene Evidences unter `db/attachments` **und** die Huey-Task-Queue
+`db/huey.db`) und `qdrant_data` (Vektor-Index).
+
+> Hinweis: Auch mit Postgres als Haupt-DB schreiben `backend` und `huey` weiterhin in
+> das Verzeichnis `/code/db` – vor allem die Async-Task-Queue `huey.db` (eine eigene
+> SQLite-Datei) und die Evidence-Uploads. Beide Container teilen sich dafür dasselbe
+> `app_data`-Volume. Ohne beschreibbares `db/` startet das Backend nicht
+> (`sqlite3.OperationalError: unable to open database file`).
 
 ## Schritt 1: Projekt und Compose-Service in Dokploy anlegen
 
@@ -108,7 +115,7 @@ Traefik-Hinweise (siehe auch Vault-Ressource Dokploy):
 Deploy auslösen und Logs prüfen. Erwartete Startreihenfolge:
 
 1. `postgres` wird `healthy`.
-2. `init-attachments` läuft durch und beendet sich (`exited (0)`).
+2. `init-data` läuft durch und beendet sich (`exited (0)`).
 3. `backend` startet, migriert die DB, lädt die Libraries (dauert ein paar Minuten,
    `start_period` ist 150s), wird dann `healthy`.
 4. `huey` und `frontend` starten, sobald das Backend gesund ist.
@@ -142,7 +149,7 @@ Start automatisch. Die Volumes bleiben erhalten.
 Regelmäßig sichern:
 
 - `postgres_data` (Datenbank) – z.B. per `pg_dump` aus dem Postgres-Container.
-- `attachments_data` (Evidence-Dateien) – Volume-Backup.
+- `app_data` (Evidence-Dateien unter `db/attachments`) – Volume-Backup.
 
 `qdrant_data` ist ein reiner Index und wird bei Bedarf neu aufgebaut, ist also nicht
 backup-kritisch.
